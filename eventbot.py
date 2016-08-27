@@ -47,7 +47,6 @@ class EventBot(RedditBot):
         now = utc.localize(datetime.datetime.utcnow())  # get current time in UTC timezone
         return now > start_datetime  # True if now is after start time
 
-
     @staticmethod
     def _get_event_html():
         """
@@ -116,7 +115,6 @@ class EventBot(RedditBot):
             logger.error("Table could not be generated.")
         return table
 
-    @ttl_cache(ttl=3600)
     def get_existing_table_post(self, subreddit):
         """
          Searches a subreddit for a specific post. If found, return it. Else, return None.
@@ -164,14 +162,18 @@ class EventBot(RedditBot):
             existing_post = self.get_existing_table_post(subreddit)
             if existing_post:
                 contents = table if not is_empty else "There are no upcoming events scheduled at this time. " \
-                                                      "I will check every {} minutes".format(self.sleep_interval/60)
-                logger.info("Editing existing table post")
-                existing_post.edit(contents)
+                                                      "I will check again in {} minutes.".format(self.sleep_interval/60)
+                if contents != existing_post.selftext:
+                    logger.info("Editing existing table post")
+                    existing_post.edit(contents)
+                else:
+                    logger.info("Calendar is unchanged. Not editing existing table post.")
             elif not is_empty:
                 logger.info("Submitting new table post")
                 self.submit_new_table(table)
             else:
                 logger.info("Not submitting new calendar post because able is empty")
+        logger.info("Sleeping for {} seconds".format(self.sleep_interval))
 
 
 def main():
