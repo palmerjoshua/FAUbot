@@ -18,13 +18,14 @@ ResolveTuple = namedtuple('ResolveTuple', 'user resolved_with')
 class TicketBot(RedditBot):
     def __init__(self, user_name, *args, **kwargs):
         super().__init__(user_name, *args, reset_sleep_interval=False, **kwargs)
-        self.COMMAND_PATTERN = "^!FAUbot (buy|sell) (\d{1,2}) (?:(?:[A-Za-z,]+ ?)?([A-Za-z]+ \d{1,2}(?:th)? (?:at )?\d{1,2} ?[AaPp][Mm]))?$"
-        self.RESOLVE_PATTERN = "^!FAUbot resolve (\d{1,2}) \/u\/([\w_]+)$"
+        self.sleep_interval = 30
         self.DELETE_COMMAND = "!FAUbot delete me"
+        self.TRIGGER = "!FAUbot"  # Don't use characters that need to be escaped in regular expressions
+        self.COMMAND_PATTERN = "^{} (buy|sell) (\d{1,2}) (?:(?:[A-Za-z,]+ ?)?([A-Za-z]+ \d{1,2}(?:th)? (?:at )?\d{1,2} ?[AaPp][Mm]))?$".format(self.TRIGGER)
+        self.RESOLVE_PATTERN = "^{} resolve (\d{1,2}) \/u\/([\w_]+)$".format(self.TRIGGER)
         self._command_regex = re.compile(self.COMMAND_PATTERN)
         self._resolve_regex = re.compile(self.RESOLVE_PATTERN)
         self._ticketbot_table = self._get_ticketbot_table()
-        self.sleep_interval = 30
         self.ceremony_dict = self.get_ceremony_dict()
 
     @staticmethod
@@ -59,41 +60,6 @@ class TicketBot(RedditBot):
         data = self._get_ceremony_data()
         return self._get_ceremony_dict(data)
 
-    def parse_command(self, message):
-        logger.info("Parsing message: message=[{}]".format(message.body))
-        if "!FAUbot" not in message.body:
-            raise NoCommandInMessage
-
-        command = self._command_regex.match(message.body)
-        if command:
-            operation = command.groups()[0]
-            number = command.groups()[1]
-            try:
-                dt = parse(command.groups()[2])
-            except (ValueError, KeyError):
-                date = None
-            else:
-                try:
-                    date = next((d for d in self.ceremony_dict if parse(d) == dt))
-                except StopIteration:
-                    raise InvalidCeremonyDate(message.author, operation, number, command.groups()[2], self.ceremony_dict.keys())
-            return CommandTuple(user=message.author.name, operation=operation, number=number, date=date)
-        else:
-            raise InvalidCommand(message.author, message.body)
-
-
-
-    def _send_invalid_ceremony_date_message(self, err):
-        logger.info("Sending invalid ceremony date message: user=[{}], givenDate=[{}]".format(err.user, err.given_date))
-        message = "Uh oh! Your last command included a date on which there are no ceremonies scheduled.\n\n" \
-                  "Your last command was: `{} {} {}`\n\n" \
-                  "Here are your choices:\n\n".format(err.operation, err.number, err.given_date)
-        for date in self.ceremony_dict.keys():
-            message += "* {}\n".format(date)
-        message += "\n\nYou may try again with one of those dates."
-        subject = "Invalid Ceremony Date in Your Command"
-        self.r.send_message(err.user, subject, message)
-
     def _get_ticketbot_table(self):
         db = boto3.resource('dynamodb', region_name='us-east-1')
         return db.Table('ticketbot')
@@ -107,6 +73,10 @@ class TicketBot(RedditBot):
             'date': command_tuple.date,
             'is_resolved': False
         })
+
+    def _delete_user(self, user_name):
+        logger.info("Deleting user from database: user=[{}]".format(user_name))
+        self._ticketbot_table.delete_item(Key={'user_name': user_name})
 
     def _set_user_resolved(self, user_name, resolved_with):
         logger.info("Resolving transaction between: user=[{}], resolvedWith=[{}]".format(user_name, resolved_with))
@@ -131,9 +101,16 @@ class TicketBot(RedditBot):
             ExpressionAttributeValues={':new_number': new_number}
         )
 
-    def _delete_user(self, user_name):
-        logger.info("Deleting user from database: user=[{}]".format(user_name))
-        self._ticketbot_table.delete_item(Key={'user_name': user_name})
+    def _send_invalid_ceremony_date_message(self, err):
+        logger.info("Sending invalid ceremony date message: user=[{}], givenDate=[{}]".format(err.user, err.given_date))
+        message = "Uh oh! Your last command included a date on which there are no ceremonies scheduled.\n\n" \
+                  "Your last command was: `{} {} {}`\n\n" \
+                  "Here are your choices:\n\n".format(err.operation, err.number, err.given_date)
+        for date in self.ceremony_dict.keys():
+            message += "* {}\n".format(date)
+        message += "\n\nYou may try again with one of those dates."
+        subject = "Invalid Ceremony Date in Your Command"
+        self.r.send_message(err.user, subject, message)
 
     def _send_invalid_command_message(self, err):
         logger.info("Sending invalid command message: user=[{}]".format(err.user))
@@ -152,12 +129,48 @@ class TicketBot(RedditBot):
         subject = "Successfully Processed Request"
         self.r.send_message(command_tuple.user, subject, message)
 
+    def _send_delete_confirmation_message(self, user_name):
+        message = "Your graduation ticket record has been deleted from the database. You will no longer be considered " \
+                  "when I try to match buyers and sellers of graduation tickets. Feel free to sign back up at any time."
+        subject = "Successfully Deleted Record"
+        self.r.send_message(user_name, subject, message)
+
+    def _parse_command_regex(self, message):
+        pass
+
+    def parse_command(self, message):
+        logger.info("Parsing message: message=[{}]".format(message.body))
+        if "!FAUbot" not in message.body:
+            raise NoCommandInMessage
+
+        command = self._command_regex.match(message.body)
+        if command:
+            operation = command.groups()[0]
+            number = command.groups()[1]
+            try:
+                dt = parse(command.groups()[2])
+            except (ValueError, KeyError):
+                date = None
+            else:
+                try:
+                    date = next((d for d in self.ceremony_dict if parse(d) == dt))
+                except StopIteration:
+                    raise InvalidCeremonyDate(message.author, operation, number, command.groups()[2], self.ceremony_dict.keys())
+            return CommandTuple(user=message.author.name, operation=operation, number=number, date=date)
+        else:
+            command = self._resolve_regex.match(message.body)
+
+
+
+            raise InvalidCommand(message.author, message.body)
+
     def work(self):
         logger.info("Getting unread messages")
         inbox = self.r.get_unread(unset_has_mail=True)
         for message in inbox:
             if self.DELETE_COMMAND in message.body:
                 self._delete_user(message.author.name)
+                self._send_delete_confirmation_message(message.author.name)
                 message.mark_as_read()
             else:
                 try:
