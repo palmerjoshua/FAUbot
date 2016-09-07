@@ -6,6 +6,7 @@ secrets.*
 praw.ini
 logs/*
 *.iml
+scripts/test_commands.yaml
 
 ## Directory-based project format:
 .idea/

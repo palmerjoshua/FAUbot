@@ -131,7 +131,17 @@ def get_bot_class_name(site_name, _current_parser=None):
     Gets the name of the Bot subclass that should be used when creating a bot.
     :return: A name of a class in bots.py. It should be one of the values in bots.BOT_CLASSES
     """
-    return get_value(site_name, 'bot_class_name', _current_parser)
+    return get_value(site_name, 'bot_class_name', _current_parser=_current_parser)
+
+
+def get_test_command_site_names(_current_parser=None):
+    parser = _get_parser(_current_parser)
+    return [site_name for site_name in get_all_site_names(parser) if get_bot_class_name(site_name, parser) == 'test_commands']
+
+
+def get_site_names_from_bot_name(bot_name, _current_parser=None):
+    parser = _get_parser(_current_parser)
+    return [site_name for site_name in get_all_site_names(parser) if bot_name in get_bot_class_name(site_name, parser)]
 
 if __name__ == '__main__':
     print("Config path: {}".format(CONFIG_PATH))
