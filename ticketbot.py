@@ -15,16 +15,17 @@ CEREMONY_URL = "https://www.fau.edu/registrar/graduation/ceremony.php"
 
 CommandTuple = namedtuple('CommandTuple', 'user operation amount date')
 ResolveTuple = namedtuple('ResolveTuple', 'user resolve_with resolve_amount')
+NotifyTuple = namedtuple('NotifyTuple', 'function params')
 
 
+# region ticketbot
 class TicketBot(RedditBot):
     def __init__(self, user_name, *args, **kwargs):
-        super().__init__(user_name, *args, reset_sleep_interval=False, **kwargs)
-        self.sleep_interval = 30
+        super().__init__(user_name, *args, **kwargs)
         self.DELETE_COMMAND = "!FAUbot delete me"
         self.TRIGGER = ""  # Don't use characters that need to be escaped in regular expressions
         self.COMMAND_PATTERN = "^!FAUbot (buy|sell) (\d{1,2})(?: (.+))?$"
-        self.RESOLVE_PATTERN = "^!FAUbot resolve \/u\/([\w_-]+)(?: (\d{1,2})?)?$"
+        self.RESOLVE_PATTERN = "^!FAUbot resolve (\d{1,2}) (?:\/u\/)?([\w_-]{3,})$"
         self._command_regex = re.compile(self.COMMAND_PATTERN)
         self._resolve_regex = re.compile(self.RESOLVE_PATTERN)
         self._ticketbot_table = self._get_ticketbot_table()
@@ -34,6 +35,7 @@ class TicketBot(RedditBot):
 
         pass
 
+    # region ceremonyFns
     @staticmethod
     def _get_ceremony_data():
         r = requests.get(CEREMONY_URL)
@@ -68,12 +70,16 @@ class TicketBot(RedditBot):
     def get_ceremony_dict(self):
         data = self._get_ceremony_data()
         return self._get_ceremony_dict(data)
+    # endregion
 
-    def _get_ticketbot_table(self):
-        db = boto3.resource('dynamodb', region_name='us-east-1')
+    # region DB-Helpers
+    @staticmethod
+    def _get_ticketbot_table():
+        db = boto3.resource('dynamodb')
         return db.Table('ticketbot')
 
-    def _get_user_item(self, command_tuple):
+    @staticmethod
+    def _get_user_item(command_tuple):
         """
         :type command_tuple: CommandTuple
         :param command_tuple:
@@ -81,13 +87,14 @@ class TicketBot(RedditBot):
         """
         return {
             'user_name': command_tuple.user.lower(),
+            'ceremony_date': command_tuple.date,
             'operation': command_tuple.operation,
             'amount': command_tuple.amount,
-            'date': command_tuple.date,
             'resolved': False
         }
 
-    def _get_user_key(self, user_name):
+    @staticmethod
+    def _get_user_key(user_name):
         return {'user_name': user_name.lower()}
 
     def _add_new_db_record(self, command_tuple):
@@ -97,8 +104,45 @@ class TicketBot(RedditBot):
         :return:
         """
         logger.info("Saving new record in database: {}".format(command_tuple))
+        self._ticketbot_table = self._get_ticketbot_table()
         self._ticketbot_table.put_item(Item=self._get_user_item(command_tuple))
 
+    def _delete_db_record(self, user_name):
+        logger.info("Deleting user from database: user=[{}]".format(user_name))
+        self._ticketbot_table = self._get_ticketbot_table()
+        self._ticketbot_table.delete_item(Key=self._get_user_key(user_name))
+
+    def _update_db_record(self, user_name, operator_string, **items_to_update):
+        update_expression = ",".join("SET {value} {operator} :{value}".format(value=item, operator=operator_string) for item in items_to_update)
+        expression_attribute_values = {':{}'.format(item): new_value for item, new_value in items_to_update.items()}
+        self._ticketbot_table = self._get_ticketbot_table()
+        self._ticketbot_table.update_item(
+            Key=self._get_user_key(user_name),
+            UpdateExpression=update_expression,
+            ExpressionAttributeValues=expression_attribute_values
+        )
+
+    def _increment_db_item_value(self, user_name, value_name, delta):
+        to_update = {value_name: delta}
+        self._update_db_record(user_name, "= {} +".format(value_name), **to_update)
+
+    def _batch_write_new_db_records(self):
+        if self._queue_data_present():
+            self._ticketbot_table = self._get_ticketbot_table()
+            with self._ticketbot_table.batch_writer(overwrite_by_pkeys=['user_name', 'ceremony_date']) as batch:
+                while not self.delete_queue.empty():
+                    item = self.delete_queue.get()
+                    logger.info("Deleting DB record: Key=[{}]".format(item))
+                    batch.delete_item(Key=item)
+                while not self.add_queue.empty():
+                    item = self.add_queue.get()
+                    logger.info("Writing new DB record: Item=[{}]".format(item))
+                    batch.put_item(Item=item)
+        else:
+            logger.info("All Queues are empty. Not writing anything to database.")
+    # endregion
+
+    # region Command-Queue
     def _new_user_add_queue(self, command_tuple):
         """
         :type command_tuple: CommandTuple
@@ -109,30 +153,10 @@ class TicketBot(RedditBot):
 
     def _new_user_delete_queue(self, user_name):
         self.delete_queue.put(self._get_user_key(user_name))
+    # endregion
 
-    def _batch_write_new_db_records(self):
-        notify_functions = {}
-        if self._queue_data_present():
-            with self._ticketbot_table.batch_writer() as batch:
-                while not self.delete_queue.empty():
-                    item = self.delete_queue.get()
-                    notify_functions[item['user_name'].lower()] = self._send_delete_confirmation_message
-                    logger.info("Deleting DB record: Key=[{}]".format(item))
-                    batch.delete_item(Key=item)
-                while not self.add_queue.empty():
-                    item = self.add_queue.get()
-                    notify_functions[item['user_name'].lower()] = self._send_confirmation_message
-                    logger.info("Writing new DB record: Item=[{}]".format(item))
-                    batch.put_item(Item=item)
-        else:
-            logger.info("All Queues are empty. Not writing anything to database.")
-        return notify_functions
-
-    def _delete_user(self, user_name):
-        logger.info("Deleting user from database: user=[{}]".format(user_name))
-        self._ticketbot_table.delete_item(Key=self._get_user_key(user_name))
-
-    def _set_user_resolved(self, resolve_tuple):
+    # region setUserVals
+    def _set_user_resolved(self, resolve_tuple):  # todo refactor
         """
         :type resolve_tuple: ResolveTuple
         :param resolve_tuple:
@@ -165,47 +189,44 @@ class TicketBot(RedditBot):
             ExpressionAttributeValues=second_attributes
         )
 
-    def _update_db_item(self, user_name, operator_string, **items_to_update):
-        update_expression = ",".join("SET {value} {operator} :{value}".format(value=item, operator=operator_string) for item in items_to_update)
-        expression_attribute_values = {':{}'.format(item): new_value for item, new_value in items_to_update.items()}
-        self._ticketbot_table.update_item(
-            Key=self._get_user_key(user_name),
-            UpdateExpression=update_expression,
-            ExpressionAttributeValues=expression_attribute_values
-        )
-
     def _set_user_ticket_amount(self, user_name, new_amount):
         logger.info("Updating ticket amount in database: user=[{}], newAmount=[{}]".format(user_name, new_amount))
-        self._update_db_item(user_name, "=", amount=new_amount)
+        self._update_db_record(user_name, "=", amount=new_amount)
 
-    def _increment_db_item_value(self, user_name, value_name, delta):
-        to_update = {value_name: delta}
-        self._update_db_item(user_name, "= {} +".format(value_name), **to_update)
+
 
     def _change_user_ticket_amount(self, user_name, delta):
         self._increment_db_item_value(user_name, 'amount', delta)
+    # endregion
 
+    # region GetUsers
     def _get_users_by_ceremony_date(self, ceremony_date_string, has_tickets_only=True):
-        filter_expression = Attr('date').eq(ceremony_date_string)
+        self._ticketbot_table = self._get_ticketbot_table()
+        filter_expression = Attr('ceremony_date').eq(ceremony_date_string)
         if has_tickets_only:
             filter_expression = filter_expression & Attr('amount').gt(0)
         response = self._ticketbot_table.scan(
-            FilterExpression=filter_expression
+            Select='ALL_ATTRIBUTES',
+            FilterExpression=filter_expression,
+            ConsistentRead=True
         )
         return response['Items']
 
     def _get_user_by_username(self, user_name):
+        self._ticketbot_table = self._get_ticketbot_table()
         response = self._ticketbot_table.query(
             KeyConditionExpression=Key('user_name').eq(user_name.lower())
         )
         return response['Items']
 
     def _get_users_by_date_and_operation(self, ceremony_date_string, operation, has_tickets=True):
-        filter_expression = Attr('date').eq(ceremony_date_string) & Attr('operation').eq(operation)
+        filter_expression = Attr('ceremony_date').eq(ceremony_date_string) and Attr('operation').eq(operation)
         if has_tickets:
-            filter_expression = filter_expression & Attr('amount').gt(0)
+            filter_expression = filter_expression and Attr('amount').gt(0)
         response = self._ticketbot_table.scan(
-            FilterExpression=filter_expression
+            Select='ALL_ATTRIBUTES',
+            FilterExpression=filter_expression,
+            ConsistentRead=True
         )
         return response['Items']
 
@@ -215,6 +236,14 @@ class TicketBot(RedditBot):
     def _get_sellers_by_date(self, ceremony_date_string, has_tickets=True):
         return self._get_users_by_date_and_operation(ceremony_date_string, 'sell', has_tickets)
 
+    def get_buyers_for_notification(self):
+        return {ceremony: self._get_buyers_by_date(ceremony) for ceremony in self.ceremony_dict}
+
+    def get_sellers_for_notification(self):
+        return {ceremony: self._get_sellers_by_date(ceremony) for ceremony in self.ceremony_dict}
+    # endregion
+
+    # region messages
     def _send_invalid_ceremony_date_message(self, err):
         logger.info("Sending invalid ceremony date message: user=[{}], givenDate=[{}]".format(err.user, err.given_date))
         message = "Uh oh! Your last command included a date on which there are no ceremonies scheduled.\n\n" \
@@ -269,15 +298,26 @@ class TicketBot(RedditBot):
         :return:
         """
         logger.info("Sending confirmation message: user=[{}]".format(command_tuple.user))
-        message = "Your request has been processed. Your command:\n\n" \
-                  "`{} {} {}`\n\n" \
-                  "You're in the database now.".format(command_tuple.operation, command_tuple.amount, command_tuple.date)
+
+        message = """Your request has been processed. Here is your profile:
+
+* **User:** {user}
+* **Date:** {date}
+* **Operation:** {operation}
+* **Amount:** {amount}
+
+
+I will try to find other users who can help you {operation} those tickets. If I find any, I'll send you a list of links
+to their Reddit user profiles. From there you can send them private messages to discuss {operation}ing the tickets.
+""".format(user=command_tuple.user, date=command_tuple.date, operation=command_tuple.operation, amount=command_tuple.amount)
+
         subject = "Successfully Processed Request"
         self.r.send_message(command_tuple.user, subject, message)
 
     def _send_delete_confirmation_message(self, user_name):
-        message = "Your graduation ticket record has been deleted from the database. You will no longer be considered " \
-                  "when I try to match buyers and sellers of graduation tickets. Feel free to sign up again at any time."
+        message = "Your graduation ticket record has been deleted from the database. " \
+                  "You will no longer be considered when I try to match buyers and sellers of graduation tickets. " \
+                  "Feel free to sign up again at any time."
         subject = "Successfully Deleted Record"
         self.r.send_message(user_name, subject, message)
 
@@ -292,7 +332,9 @@ class TicketBot(RedditBot):
                    "about parsing dates, but better safe than sorry!"
         subject = "Missing Ceremony in Command"
         self.r.send_message(err.user, subject, message)
+    # endregion
 
+    # region parseCommands
     def _parse_new_command(self, command, message):
         user = message.author.name.lower()
         operation = command.groups()[0]
@@ -331,46 +373,55 @@ class TicketBot(RedditBot):
             return self._parse_resolve_command(command, message)
         raise InvalidCommand(message.author, message.body)
 
-    def work(self):
-        logger.info("Getting unread messages")
+    def parse_commands_and_notify_users(self):
+        to_notify = []
         inbox = self.r.get_unread(unset_has_mail=True)
-        to_notify_params = {}
-        to_notify_fns = {}
         for message in inbox:
+
             mark_as_read = True
+            function, params = None, None
             if self.DELETE_COMMAND in message.body:
-                self._new_user_delete_queue(message.author.name.lower())
-                to_notify_params[message.author.name.lower()] = message.author.name.lower()
+                user = message.author.name.lower()
+                self._new_user_delete_queue(user)
+                function, params = self._send_delete_confirmation_message, user
             else:
                 try:
                     command = self.parse_command(message)
-                    pass
                 except NoCommandInMessage:
                     mark_as_read = False
                 except InvalidCommand as err:
-                    to_notify_params[err.user.lower()] = err
-                    to_notify_fns[err.user.lower()] = self._send_invalid_command_message
+                    function, params = self._send_invalid_command_message, err
                 except InvalidCeremonyDate as err:
-                    to_notify_params[err.user] = err
-                    to_notify_fns[err.user.lower()] = self._send_invalid_ceremony_date_message
+                    function, params = self._send_invalid_ceremony_date_message, err
                 except MissingCeremonyDate as err:
-                    to_notify_params[err.user.lower()] = err
-                    to_notify_fns[err.user.lower()] = self._send_missing_ceremony_message
+                    function, params = self._send_missing_ceremony_message, err
                 else:
                     if isinstance(command, CommandTuple):
                         self._new_user_add_queue(command)
-                        to_notify_params[message.author.name.lower()] = command
-                        pass
+                        function, params = self._send_confirmation_message, command
                     if isinstance(command, ResolveTuple):
                         self._set_user_resolved(command)
-                        self._send_resolve_confirmation_message(command)
+                        function, params = self._send_resolve_confirmation_message, command
             if mark_as_read:
                 message.mark_as_read()
-        to_notify_fns.update(self._batch_write_new_db_records())
-        for user_name, notify_fn in to_notify_fns.items():
-            notify_fn(to_notify_params[user_name])
+                to_notify.append(NotifyTuple(function=function, params=params))
+        self._batch_write_new_db_records()
+        for nt in to_notify:
+            nt.function(nt.params)
+    #endregion
+
+    def match_users(self):
+        users = []
+        buyers, sellers = self.get_buyers_for_notification(), self.get_sellers_for_notification()
 
 
+    def work(self):
+        logger.info("Getting unread messages")
+        self.parse_commands_and_notify_users()
+# endregion
+
+
+# region exceptions
 class NoCommandInMessage(Exception):
     pass
 
@@ -400,6 +451,7 @@ class MissingCeremonyDate(ValueError):
         self.operation = operation
         msg = "Missing ceremony date in command: user=[{}], amount=[{}], operation=[{}], choices=[{}]".format(user, operation, amount, choices)
         super(MissingCeremonyDate, self).__init__(msg)
+# endregion
 
 
 def main():
@@ -416,9 +468,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-if __name__ == '__main__':
-    bot = TicketBot('FAUbot', run_once=True)
-    bot.start()
-    bot.stop_event.wait()
