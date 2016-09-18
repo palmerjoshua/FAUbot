@@ -3,14 +3,14 @@ from config import getLogger
 from bots import RedditBot
 from dateutil.parser import parse
 from collections import OrderedDict, namedtuple
-from cachetools import ttl_cache, TTLCache
 from queue import Queue
 import requests
 from bs4 import BeautifulSoup
 import boto3, boto3.dynamodb
 from boto3.dynamodb.conditions import Key, Attr
 logger = getLogger()
-
+from pprint import PrettyPrinter
+p = PrettyPrinter(indent=2)
 CEREMONY_URL = "https://www.fau.edu/registrar/graduation/ceremony.php"
 
 CommandTuple = namedtuple('CommandTuple', 'user operation amount date')
@@ -33,9 +33,7 @@ class TicketBot(RedditBot):
         self.add_queue = Queue()
         self.delete_queue = Queue()
 
-        pass
-
-    # region ceremonyFns
+    # region Ceremony-Functions
     @staticmethod
     def _get_ceremony_data():
         r = requests.get(CEREMONY_URL)
@@ -137,7 +135,7 @@ class TicketBot(RedditBot):
                 while not self.add_queue.empty():
                     item = self.add_queue.get()
                     logger.info("Writing new DB record: Item=[{}]".format(item))
-                    batch.put_item(Item=item)
+                    batch.put_item(item)
         else:
             logger.info("All Queues are empty. Not writing anything to database.")
     # endregion
@@ -155,7 +153,7 @@ class TicketBot(RedditBot):
         self.delete_queue.put(self._get_user_key(user_name))
     # endregion
 
-    # region setUserVals
+    # region Set-User-Vals
     def _set_user_resolved(self, resolve_tuple):  # todo refactor
         """
         :type resolve_tuple: ResolveTuple
@@ -199,18 +197,22 @@ class TicketBot(RedditBot):
         self._increment_db_item_value(user_name, 'amount', delta)
     # endregion
 
-    # region GetUsers
-    def _get_users_by_ceremony_date(self, ceremony_date_string, has_tickets_only=True):
+    # region Get-Users
+    def _get_users_by_ceremony_date(self, ceremony_date_string):
         self._ticketbot_table = self._get_ticketbot_table()
-        filter_expression = Attr('ceremony_date').eq(ceremony_date_string)
-        if has_tickets_only:
-            filter_expression = filter_expression & Attr('amount').gt(0)
+        filter_expression = Key('ceremony_date').eq(ceremony_date_string)
+        result = []
         response = self._ticketbot_table.scan(
-            Select='ALL_ATTRIBUTES',
-            FilterExpression=filter_expression,
-            ConsistentRead=True
-        )
-        return response['Items']
+            ProjectionExpression='user_name, ceremony_date, amount, operation',
+            FilterExpression=filter_expression)
+        result = response['Items']
+        while 'LastEvaluatedKey' in response:
+            response = self._ticketbot_table.scan(
+                ProjectionExpression="user_name, ceremony_date, amount, operation",
+                FilterExpression=filter_expression,
+                ExclusiveStartKey=response['LastEvaluatedKey'])
+            result.extend(response['Items'])
+        return result
 
     def _get_user_by_username(self, user_name):
         self._ticketbot_table = self._get_ticketbot_table()
@@ -220,15 +222,15 @@ class TicketBot(RedditBot):
         return response['Items']
 
     def _get_users_by_date_and_operation(self, ceremony_date_string, operation, has_tickets=True):
-        filter_expression = Attr('ceremony_date').eq(ceremony_date_string) and Attr('operation').eq(operation)
-        if has_tickets:
-            filter_expression = filter_expression and Attr('amount').gt(0)
-        response = self._ticketbot_table.scan(
-            Select='ALL_ATTRIBUTES',
-            FilterExpression=filter_expression,
-            ConsistentRead=True
-        )
-        return response['Items']
+        users = self._get_users_by_ceremony_date(ceremony_date_string)
+        users = list(filter(lambda u: u['operation'] == operation, users))
+        return users
+
+    def _get_users_by_date_and_operations(self, ceremony_date_string):
+        users = self._get_users_by_ceremony_date(ceremony_date_string)
+        result = {'buy': [u for u in users if u['ceremony_date'] == ceremony_date_string and u['operation'] == 'buy'],
+                  'sell': [u for u in users if u['ceremony_date'] == ceremony_date_string and u['operation'] == 'sell']}
+        return result
 
     def _get_buyers_by_date(self, ceremony_date_string, has_tickets=True):
         return self._get_users_by_date_and_operation(ceremony_date_string, 'buy', has_tickets)
@@ -241,9 +243,14 @@ class TicketBot(RedditBot):
 
     def get_sellers_for_notification(self):
         return {ceremony: self._get_sellers_by_date(ceremony) for ceremony in self.ceremony_dict}
+
+    def get_users_for_notification(self):
+        users = {ceremony: self._get_users_by_date_and_operations(ceremony) for ceremony in self.ceremony_dict}
+        return {ceremony: operation_dict for ceremony, operation_dict in users.items() if any(val for val in operation_dict.values())}
+
     # endregion
 
-    # region messages
+    # region Reddit-Messages
     def _send_invalid_ceremony_date_message(self, err):
         logger.info("Sending invalid ceremony date message: user=[{}], givenDate=[{}]".format(err.user, err.given_date))
         message = "Uh oh! Your last command included a date on which there are no ceremonies scheduled.\n\n" \
@@ -332,9 +339,44 @@ to their Reddit user profiles. From there you can send them private messages to 
                    "about parsing dates, but better safe than sorry!"
         subject = "Missing Ceremony in Command"
         self.r.send_message(err.user, subject, message)
+
+    def _generate_buy_sell_notification(self, operation):
+
+        message_template = "Good news! I found some students who are trying to {other_operation} graduation tickets. " \
+                           "Now you should visit their profiles and send them private messages to discuss {operation}ing " \
+                           "the tickets.\n\nIf you end up {operation}ing tickets from anyone, please let me know! Here's " \
+                           "how you \"resolve\" a purchase. :\n\n `!Faubot resolve <number> <{other_operation}er_username>`\n\n" \
+                           "For example, `!FAUbot resolve 5 /u/jpfau` means you {past_tense_operation} 5 tickets from " \
+                           "the user jpfau. For now, I will only accept resolve commands from buyers, and I will ignore " \
+                           "them from sellers. It's up to you to help keep my ticket system working!\n\nAnyway, here is " \
+                           "the list of {other_operation}ers:\n\n"
+        if operation == 'buy':
+            past_tense_operation = 'bought'
+            other_operation = 'sell'
+        elif operation == 'sell':
+            past_tense_operation = 'sold'
+            other_operation = 'buy'
+        else:
+            raise ValueError("Parameter not 'buy' or 'sell': parameter=[{}]".format(operation))
+        return message_template.format(operation=operation, past_tense_operation=past_tense_operation, other_operation=other_operation)
+
+    def _notify_buyers_sellers(self, to_notify, operation):
+        for user_name, list_users in to_notify.items():
+            message = self._generate_buy_sell_notification(operation)
+            for other_user in list_users:
+                message += "* **/u/{}** is {}ing **{}** tickets\n".format(other_user['user_name'], other_user['operation'], other_user['amount'])
+            message += "\n\n"
+            subject = "It's a match!"
+            self.r.send_message(user_name, subject, message)
+
+    def notify_buyers(self, buyers):
+        self._notify_buyers_sellers(buyers, 'buy')
+
+    def notify_sellers(self, sellers):
+        self._notify_buyers_sellers(sellers, 'sell')
     # endregion
 
-    # region parseCommands
+    # region Parse-Commands
     def _parse_new_command(self, command, message):
         user = message.author.name.lower()
         operation = command.groups()[0]
@@ -411,17 +453,21 @@ to their Reddit user profiles. From there you can send them private messages to 
     #endregion
 
     def match_users(self):
-        users = []
-        buyers, sellers = self.get_buyers_for_notification(), self.get_sellers_for_notification()
-
+        users = self.get_users_for_notification()
+        for operation_dict in users.values():
+            buyers, sellers = operation_dict['buy'], operation_dict['sell']
+            buyers_to_notify = {buyer['user_name']: sorted(sellers, key=lambda s: seller['amount']) for buyer in buyers}
+            sellers_to_notify = {seller['user_name']: sorted(buyers, key=lambda b: b['amount']) for seller in sellers}
+            self.notify_buyers(buyers_to_notify)
+            self.notify_sellers(sellers_to_notify)
 
     def work(self):
-        logger.info("Getting unread messages")
-        self.parse_commands_and_notify_users()
+        # self.parse_commands_and_notify_users()
+        self.match_users()
 # endregion
 
 
-# region exceptions
+# region Exceptions
 class NoCommandInMessage(Exception):
     pass
 
@@ -458,10 +504,10 @@ def main():
     from config.praw_config import get_all_site_names
     from argparse import ArgumentParser
     parser = ArgumentParser("Running TicketBot by itself")
-    parser.add_argument("-a", "--account", dest="reddit_account", required=True, choices=get_all_site_names(),
-                        help="Specify which Reddit account entry from praw.ini to use.")
+    parser.add_argument("-u", "--user", dest="reddit_user", required=True, choices=get_all_site_names(),
+                        help="Specify which Reddit user from praw.ini to use.")
     args = parser.parse_args()
-    test = TicketBot(args.reddit_account, run_once=True)
+    test = TicketBot(args.reddit_user, run_once=True)
     test.start()
     test.stop_event.wait()
 

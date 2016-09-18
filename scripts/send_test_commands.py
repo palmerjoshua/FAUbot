@@ -1,4 +1,9 @@
 from argparse import ArgumentParser
+from sys import path
+from os.path import dirname as dirn
+
+path.append(dirn(path[0]))
+
 from config.praw_config import get_test_command_site_names, get_site_names_from_bot_name, PRAW_FILE_PATH
 import praw
 import bots
@@ -11,8 +16,8 @@ test_command_path = "test_commands.yaml"
 
 def get_logged_in_reddit(user_name, message_recipient):
     user_agent_template = "/u/{} sending PMs to /u/{} to test TicketBot functionality for the FAUbot project. " \
-                          "See github.com/palmerjoshua/FAUbot.git"
-    r = praw.Reddit(user_agent=user_agent_template.format(user_name, message_recipient), site_name=user_name)
+                          "See github.com/palmerjoshua/FAUbot.git".format(user_name, message_recipient)
+    r = praw.Reddit(user_agent=user_agent_template, site_name=user_name)
     try:
         current_access_info = r.refresh_access_information()
     except praw.errors.HTTPException:
