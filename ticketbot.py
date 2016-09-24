@@ -1,4 +1,7 @@
 import re
+
+import datetime
+
 from config import getLogger
 from bots import RedditBot
 from dateutil.parser import parse
@@ -15,8 +18,8 @@ CEREMONY_URL = "https://www.fau.edu/registrar/graduation/ceremony.php"
 
 CommandTuple = namedtuple('CommandTuple', 'user operation amount date')
 ResolveTuple = namedtuple('ResolveTuple', 'user resolve_with resolve_amount')
-NotifyTuple = namedtuple('NotifyTuple', 'function params')
-
+NotifyFunctionTuple = namedtuple('NotifyFunctionTuple', 'function params')
+SetUserNotifiedTuple = namedtuple('SetUserNotifiedTuple', 'user ceremony_date notify_date')
 
 # region ticketbot
 class TicketBot(RedditBot):
@@ -138,6 +141,29 @@ class TicketBot(RedditBot):
                     batch.put_item(item)
         else:
             logger.info("All Queues are empty. Not writing anything to database.")
+
+    def _set_user_notified(self, notify_tuple):
+        """
+        :type notify_tuple: SetUserNotifiedTuple
+        :param notify_tuple:
+        """
+        table = self._get_ticketbot_table()
+        table.update_item(
+            Key={
+                'user_name': notify_tuple.user,
+                'ceremony_date': notify_tuple.ceremony_date
+            },
+            UpdateExpression='SET last_notified = :nd',
+            ExpressionAttributeValues={':nd': notify_tuple.notify_date}
+        )
+
+    def _set_users_notified(self, user_dict):
+        now = datetime.datetime.utcnow().isoformat()
+        for ceremony_date, operation_dict in user_dict.items():
+            all_users = operation_dict['buy'] + operation_dict['sell']
+            for user in all_users:
+                notify_tuple = SetUserNotifiedTuple(user=user['user_name'], ceremony_date=ceremony_date, notify_date=now)
+                self._set_user_notified(notify_tuple)
     # endregion
 
     # region Command-Queue
@@ -203,12 +229,12 @@ class TicketBot(RedditBot):
         filter_expression = Key('ceremony_date').eq(ceremony_date_string)
         result = []
         response = self._ticketbot_table.scan(
-            ProjectionExpression='user_name, ceremony_date, amount, operation',
+            ProjectionExpression='user_name, ceremony_date, amount, operation, last_notified',
             FilterExpression=filter_expression)
         result = response['Items']
         while 'LastEvaluatedKey' in response:
             response = self._ticketbot_table.scan(
-                ProjectionExpression="user_name, ceremony_date, amount, operation",
+                ProjectionExpression="user_name, ceremony_date, amount, operation, last_notified",
                 FilterExpression=filter_expression,
                 ExclusiveStartKey=response['LastEvaluatedKey'])
             result.extend(response['Items'])
@@ -226,10 +252,19 @@ class TicketBot(RedditBot):
         users = list(filter(lambda u: u['operation'] == operation, users))
         return users
 
-    def _get_users_by_date_and_operations(self, ceremony_date_string):
+    def _has_last_notified(self, user):
+        n = user.get('last_notified', None)
+        return n is not None
+
+    def _get_users_by_date_and_operations(self, ceremony_date_string, last_notify_hours=0):
         users = self._get_users_by_ceremony_date(ceremony_date_string)
         result = {'buy': [u for u in users if u['ceremony_date'] == ceremony_date_string and u['operation'] == 'buy'],
                   'sell': [u for u in users if u['ceremony_date'] == ceremony_date_string and u['operation'] == 'sell']}
+        if last_notify_hours > 0:
+            now = datetime.datetime.utcnow()
+            limit = now - datetime.timedelta(hours=last_notify_hours)
+            for key, val in result.items():
+                result[key] = [u for u in val if not self._has_last_notified(u) or parse(u['last_notified']) <= limit]
         return result
 
     def _get_buyers_by_date(self, ceremony_date_string, has_tickets=True):
@@ -245,9 +280,9 @@ class TicketBot(RedditBot):
         return {ceremony: self._get_sellers_by_date(ceremony) for ceremony in self.ceremony_dict}
 
     def get_users_for_notification(self):
-        users = {ceremony: self._get_users_by_date_and_operations(ceremony) for ceremony in self.ceremony_dict}
-        return {ceremony: operation_dict for ceremony, operation_dict in users.items() if any(val for val in operation_dict.values())}
-
+        users = {ceremony: self._get_users_by_date_and_operations(ceremony, 24) for ceremony in self.ceremony_dict}
+        to_return = {ceremony: operation_dict for ceremony, operation_dict in users.items() if any(val for val in operation_dict.values())}
+        return to_return
     # endregion
 
     # region Reddit-Messages
@@ -446,7 +481,7 @@ to their Reddit user profiles. From there you can send them private messages to 
                         function, params = self._send_resolve_confirmation_message, command
             if mark_as_read:
                 message.mark_as_read()
-                to_notify.append(NotifyTuple(function=function, params=params))
+                to_notify.append(NotifyFunctionTuple(function=function, params=params))
         self._batch_write_new_db_records()
         for nt in to_notify:
             nt.function(nt.params)
@@ -456,10 +491,11 @@ to their Reddit user profiles. From there you can send them private messages to 
         users = self.get_users_for_notification()
         for operation_dict in users.values():
             buyers, sellers = operation_dict['buy'], operation_dict['sell']
-            buyers_to_notify = {buyer['user_name']: sorted(sellers, key=lambda s: seller['amount']) for buyer in buyers}
+            buyers_to_notify = {buyer['user_name']: sorted(sellers, key=lambda s: s['amount']) for buyer in buyers}
             sellers_to_notify = {seller['user_name']: sorted(buyers, key=lambda b: b['amount']) for seller in sellers}
             self.notify_buyers(buyers_to_notify)
             self.notify_sellers(sellers_to_notify)
+        self._set_users_notified(users)
 
     def work(self):
         # self.parse_commands_and_notify_users()
@@ -500,6 +536,7 @@ class MissingCeremonyDate(ValueError):
 # endregion
 
 
+# region Main
 def main():
     from config.praw_config import get_all_site_names
     from argparse import ArgumentParser
@@ -514,3 +551,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+# endregion
