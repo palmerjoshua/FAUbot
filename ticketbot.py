@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 from queue import Queue
 
 from bots import RedditBot
+from mixins import RedditPosterMixin
 from config import getLogger
 from config.bot_config import get_notify_interval
 
@@ -18,7 +19,7 @@ logger = getLogger()
 
 
 # region ticketbot
-class TicketBot(RedditBot):
+class TicketBot(RedditBot, RedditPosterMixin):
     NOTIFY_INTERVAL = get_notify_interval()
     CEREMONY_URL = "https://www.fau.edu/registrar/graduation/ceremony.php"
     CommandTuple = namedtuple('CommandTuple', 'user operation amount date')
@@ -453,7 +454,7 @@ to their Reddit user profiles. From there you can send them private messages to 
             return self._parse_resolve_command(command, message)
         raise InvalidCommand(message.author, message.body)
 
-    def parse_commands_and_notify_users(self):
+    def parse_ticket_commands(self):
         to_notify = []
         inbox = self.r.get_unread(unset_has_mail=True)
         for message in inbox:
@@ -490,7 +491,7 @@ to their Reddit user profiles. From there you can send them private messages to 
             nt.function(nt.params)
     #endregion
 
-    def match_users(self):
+    def match_ticket_users(self):
         users = self.get_users_for_notification()
         for operation_dict in users.values():
             buyers, sellers = operation_dict['buy'], operation_dict['sell']
@@ -500,9 +501,13 @@ to their Reddit user profiles. From there you can send them private messages to 
             self.notify_sellers(sellers_to_notify)
         self._set_users_notified(users)
 
+    def update_ticket_megathread(self):
+        pass # todo implement
+
     def work(self):
-        # self.parse_commands_and_notify_users()
-        self.match_users()
+        self.parse_ticket_commands()
+        self.match_ticket_users()
+        self.update_ticket_megathread()
 # endregion
 
 
