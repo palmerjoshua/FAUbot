@@ -1,34 +1,37 @@
 import re
-
-import datetime
-
-from config import getLogger
-from bots import RedditBot
-from dateutil.parser import parse
-from collections import OrderedDict, namedtuple
-from queue import Queue
 import requests
-from bs4 import BeautifulSoup
+import datetime
 import boto3, boto3.dynamodb
 from boto3.dynamodb.conditions import Key, Attr
-logger = getLogger()
+from collections import OrderedDict, namedtuple
+from dateutil.parser import parse
 from pprint import PrettyPrinter
-p = PrettyPrinter(indent=2)
-CEREMONY_URL = "https://www.fau.edu/registrar/graduation/ceremony.php"
+from bs4 import BeautifulSoup
+from queue import Queue
 
-CommandTuple = namedtuple('CommandTuple', 'user operation amount date')
-ResolveTuple = namedtuple('ResolveTuple', 'user resolve_with resolve_amount')
-NotifyFunctionTuple = namedtuple('NotifyFunctionTuple', 'function params')
-SetUserNotifiedTuple = namedtuple('SetUserNotifiedTuple', 'user ceremony_date notify_date')
+from bots import RedditBot
+from config import getLogger
+from config.bot_config import get_notify_interval
+
+p = PrettyPrinter(indent=2)
+logger = getLogger()
+
 
 # region ticketbot
 class TicketBot(RedditBot):
+    NOTIFY_INTERVAL = get_notify_interval()
+    CEREMONY_URL = "https://www.fau.edu/registrar/graduation/ceremony.php"
+    CommandTuple = namedtuple('CommandTuple', 'user operation amount date')
+    ResolveTuple = namedtuple('ResolveTuple', 'user resolve_with resolve_amount')
+    NotifyFunctionTuple = namedtuple('NotifyFunctionTuple', 'function params')
+    SetUserNotifiedTuple = namedtuple('SetUserNotifiedTuple', 'user ceremony_date notify_date')
+    DELETE_COMMAND = "!FAUbot delete me"
+    TRIGGER = ""  # Don't use characters that need to be escaped in regular expressions
+    COMMAND_PATTERN = "^!FAUbot (buy|sell) (\d{1,2})(?: (.+))?$"
+    RESOLVE_PATTERN = "^!FAUbot resolve (\d{1,2}) (?:\/u\/)?([\w_-]{3,})$"
+
     def __init__(self, user_name, *args, **kwargs):
         super().__init__(user_name, *args, **kwargs)
-        self.DELETE_COMMAND = "!FAUbot delete me"
-        self.TRIGGER = ""  # Don't use characters that need to be escaped in regular expressions
-        self.COMMAND_PATTERN = "^!FAUbot (buy|sell) (\d{1,2})(?: (.+))?$"
-        self.RESOLVE_PATTERN = "^!FAUbot resolve (\d{1,2}) (?:\/u\/)?([\w_-]{3,})$"
         self._command_regex = re.compile(self.COMMAND_PATTERN)
         self._resolve_regex = re.compile(self.RESOLVE_PATTERN)
         self._ticketbot_table = self._get_ticketbot_table()
@@ -39,7 +42,7 @@ class TicketBot(RedditBot):
     # region Ceremony-Functions
     @staticmethod
     def _get_ceremony_data():
-        r = requests.get(CEREMONY_URL)
+        r = requests.get(TicketBot.CEREMONY_URL)
         html = r.text
         soup = BeautifulSoup(html, 'html.parser')
 
@@ -82,7 +85,7 @@ class TicketBot(RedditBot):
     @staticmethod
     def _get_user_item(command_tuple):
         """
-        :type command_tuple: CommandTuple
+        :type command_tuple: TicketBot.CommandTuple
         :param command_tuple:
         :return:
         """
@@ -100,7 +103,7 @@ class TicketBot(RedditBot):
 
     def _add_new_db_record(self, command_tuple):
         """
-        :type command_tuple: CommandTuple
+        :type command_tuple: TicketBot.CommandTuple
         :param command_tuple:
         :return:
         """
@@ -144,7 +147,7 @@ class TicketBot(RedditBot):
 
     def _set_user_notified(self, notify_tuple):
         """
-        :type notify_tuple: SetUserNotifiedTuple
+        :type notify_tuple: TicketBot.SetUserNotifiedTuple
         :param notify_tuple:
         """
         table = self._get_ticketbot_table()
@@ -162,14 +165,14 @@ class TicketBot(RedditBot):
         for ceremony_date, operation_dict in user_dict.items():
             all_users = operation_dict['buy'] + operation_dict['sell']
             for user in all_users:
-                notify_tuple = SetUserNotifiedTuple(user=user['user_name'], ceremony_date=ceremony_date, notify_date=now)
+                notify_tuple = TicketBot.SetUserNotifiedTuple(user=user['user_name'], ceremony_date=ceremony_date, notify_date=now)
                 self._set_user_notified(notify_tuple)
     # endregion
 
     # region Command-Queue
     def _new_user_add_queue(self, command_tuple):
         """
-        :type command_tuple: CommandTuple
+        :type command_tuple: TicketBot.CommandTuple
         :param command_tuple:
         :return:
         """
@@ -182,7 +185,7 @@ class TicketBot(RedditBot):
     # region Set-User-Vals
     def _set_user_resolved(self, resolve_tuple):  # todo refactor
         """
-        :type resolve_tuple: ResolveTuple
+        :type resolve_tuple: TicketBot.ResolveTuple
         :param resolve_tuple:
         :return:
         """
@@ -280,7 +283,7 @@ class TicketBot(RedditBot):
         return {ceremony: self._get_sellers_by_date(ceremony) for ceremony in self.ceremony_dict}
 
     def get_users_for_notification(self):
-        users = {ceremony: self._get_users_by_date_and_operations(ceremony, 24) for ceremony in self.ceremony_dict}
+        users = {ceremony: self._get_users_by_date_and_operations(ceremony, TicketBot.NOTIFY_INTERVAL) for ceremony in self.ceremony_dict}
         to_return = {ceremony: operation_dict for ceremony, operation_dict in users.items() if any(val for val in operation_dict.values())}
         return to_return
     # endregion
@@ -308,7 +311,7 @@ class TicketBot(RedditBot):
 
     def _send_resolve_confirmation_message(self, resolve_tuple):
         """
-        :type resolve_tuple: ResolveTuple
+        :type resolve_tuple: TicketBot.ResolveTuple
         :param resolve_tuple:
         :return:
         """
@@ -335,7 +338,7 @@ class TicketBot(RedditBot):
 
     def _send_confirmation_message(self, command_tuple):
         """
-        :type command_tuple: CommandTuple
+        :type command_tuple: TicketBot.CommandTuple
         :param command_tuple:
         :return:
         """
@@ -427,7 +430,7 @@ to their Reddit user profiles. From there you can send them private messages to 
                 date = next((d for d in self.ceremony_dict if parse(d) == dt))
             except StopIteration:
                 raise InvalidCeremonyDate(user, operation, amount, command.groups()[2], self.ceremony_dict.keys())
-        return CommandTuple(user=user, operation=operation, amount=amount, date=date)
+        return TicketBot.CommandTuple(user=user, operation=operation, amount=amount, date=date)
 
     @staticmethod
     def _parse_resolve_command(command, message):
@@ -436,7 +439,7 @@ to their Reddit user profiles. From there you can send them private messages to 
             resolved_amount = command.groups()[1]
         except IndexError:
             resolved_amount = None
-        return ResolveTuple(user=message.author.name, resolve_with=resolved_with, resolve_amount=resolved_amount)
+        return TicketBot.ResolveTuple(user=message.author.name, resolve_with=resolved_with, resolve_amount=resolved_amount)
 
     def parse_command(self, message):
         logger.info("Parsing message: author=[{}], message=[{}]".format(message.author.name, message.body))
@@ -473,15 +476,15 @@ to their Reddit user profiles. From there you can send them private messages to 
                 except MissingCeremonyDate as err:
                     function, params = self._send_missing_ceremony_message, err
                 else:
-                    if isinstance(command, CommandTuple):
+                    if isinstance(command, TicketBot.CommandTuple):
                         self._new_user_add_queue(command)
                         function, params = self._send_confirmation_message, command
-                    if isinstance(command, ResolveTuple):
+                    if isinstance(command, TicketBot.ResolveTuple):
                         self._set_user_resolved(command)
                         function, params = self._send_resolve_confirmation_message, command
             if mark_as_read:
                 message.mark_as_read()
-                to_notify.append(NotifyFunctionTuple(function=function, params=params))
+                to_notify.append(TicketBot.NotifyFunctionTuple(function=function, params=params))
         self._batch_write_new_db_records()
         for nt in to_notify:
             nt.function(nt.params)
