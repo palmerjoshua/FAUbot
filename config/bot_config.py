@@ -48,3 +48,7 @@ def get_sleep_intervals():
 
 def get_sleep_interval(bot_class_name='debug'):
     return get_sleep_intervals()[bot_class_name]
+
+
+def get_notify_interval():
+    return get_interval('notify_hours')

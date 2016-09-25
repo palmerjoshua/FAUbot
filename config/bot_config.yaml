@@ -1,5 +1,6 @@
 intervals:
-    submission_interval_hours: 24
+    submission_interval_hours: &dayhours 24
+    notify_hours: *dayhours
     sleep_intervals:
         default: &defaultInterval 1200
         debug: &debugInterval 5
