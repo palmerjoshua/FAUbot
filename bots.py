@@ -41,7 +41,7 @@ class Bot(threading.Thread, metaclass=ABCMeta):
         """
         super(Bot, self).__init__(daemon=True)
         self.stop_event = threading.Event()
-        self.sleep_interval = bot_config.get_sleep_interval(self.__class__.__name__)
+        self.sleep_interval = bot_config.get_sleep_interval(self.__class__.__name__) if not run_once else 0
         self._reset_sleep_interval = reset_sleep_interval
         self._run_once = RUN_BOTS_ONCE or run_once
 
@@ -97,8 +97,10 @@ class RedditBot(Bot):
         :param user_name: A Reddit username that the RedditBot will use.
         """
         super(RedditBot, self).__init__(*args, **kwargs)
-        self.USER_NAME = user_name
-        self.USER_AGENT = bot_config.get_user_agent(self.__class__.__name__).format(username=self.USER_NAME)
+        if not hasattr(self, 'USER_NAME'):
+            self.USER_NAME = user_name
+        if not hasattr(self, 'USER_AGENT'):
+            self.USER_AGENT = bot_config.get_user_agent(self.__class__.__name__).format(username=self.USER_NAME)
         self.subreddits = bot_config.get_subreddits()
         self.r = None  # the praw.Reddit instance
 

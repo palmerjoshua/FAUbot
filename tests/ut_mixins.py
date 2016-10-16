@@ -1,7 +1,7 @@
 import ddt
 from ddt import ddt, unpack, data
 import unittest
-from mixins import RedditPosterMixin
+from mixins import MarkdownMaker
 
 @ddt
 class TestRedditPosterMixin(unittest.TestCase):
@@ -19,7 +19,7 @@ toy story | good cartoon | bar2
                   'output': test_table1['output']}
 
     def setUp(self):
-        self.p = RedditPosterMixin()
+        self.p = MarkdownMaker()
 
     def tearDown(self):
         self.p = None

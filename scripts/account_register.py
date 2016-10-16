@@ -77,11 +77,11 @@ def main():
     ap = argparse.ArgumentParser(description="Set refresh tokens for new accounts in the PRAW config file.")
     ap.add_argument("--new-accounts", "-n", dest="only_new_accounts", action="store_true",
                     help="Find all new accounts in the config file, and set their refresh tokens.")
-    ap.add_argument("--account-names", "-a", dest="account_names", nargs="+", default=[], choices=choices,
+    ap.add_argument("--user", "-u", dest="user_names", nargs="+", default=[], choices=choices,
                     help="Only set refresh tokens for specific accounts.")
     args = ap.parse_args()
 
-    if args.only_new_accounts and args.account_names:
+    if args.only_new_accounts and args.user_names:
         print("You cannot have both new-accounts and account-names set.")
     elif args.only_new_accounts:
         print("Registering all new accounts")

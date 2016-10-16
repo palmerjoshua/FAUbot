@@ -9,6 +9,7 @@ intervals:
         TicketBot: 20
         ExampleBot1: *debugInterval
         ExampleBot2: *debugInterval
+        RedditPosterMixin: *debugInterval
 subreddits:
     - FAUbot
 user_agents:

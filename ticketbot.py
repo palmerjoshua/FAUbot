@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 from queue import Queue
 
 from bots import RedditBot
-from mixins import RedditPosterMixin
+from mixins import MarkdownMaker, RedditPosterMixin
 from config import getLogger
 from config.bot_config import get_notify_interval
 
@@ -19,23 +19,24 @@ logger = getLogger()
 
 
 # region ticketbot
-class TicketBot(RedditBot, RedditPosterMixin):
+class TicketBot(RedditPosterMixin):
+    # region Static-Variables
     NOTIFY_INTERVAL = get_notify_interval()
     CEREMONY_URL = "https://www.fau.edu/registrar/graduation/ceremony.php"
-    CommandTuple = namedtuple('CommandTuple', 'user operation amount date')
-    ResolveTuple = namedtuple('ResolveTuple', 'user resolve_with resolve_amount')
+    UserTuple = namedtuple('UserTuple', 'user operation amount date')
+    ResolveTuple = namedtuple('ResolveTuple', 'user resolve_with resolve_amount date')
     NotifyFunctionTuple = namedtuple('NotifyFunctionTuple', 'function params')
     SetUserNotifiedTuple = namedtuple('SetUserNotifiedTuple', 'user ceremony_date notify_date')
     DELETE_COMMAND = "!FAUbot delete me"
     TRIGGER = ""  # Don't use characters that need to be escaped in regular expressions
     COMMAND_PATTERN = "^!FAUbot (buy|sell) (\d{1,2})(?: (.+))?$"
-    RESOLVE_PATTERN = "^!FAUbot resolve (\d{1,2}) (?:\/u\/)?([\w_-]{3,})$"
+    RESOLVE_PATTERN = "^!FAUbot resolve (\d{1,2}) (?:\/u\/)?([\w_-]{3,})(?: (.+))?$"
+    # endregion
 
     def __init__(self, user_name, *args, **kwargs):
         super().__init__(user_name, *args, **kwargs)
-        self._command_regex = re.compile(self.COMMAND_PATTERN)
-        self._resolve_regex = re.compile(self.RESOLVE_PATTERN)
-        self._ticketbot_table = self._get_ticketbot_table()
+        self._command_regex = re.compile(TicketBot.COMMAND_PATTERN)
+        self._resolve_regex = re.compile(TicketBot.RESOLVE_PATTERN)
         self.ceremony_dict = self.get_ceremony_dict()
         self.add_queue = Queue()
         self.delete_queue = Queue()
@@ -72,9 +73,23 @@ class TicketBot(RedditBot, RedditPosterMixin):
     def _queue_data_present(self):
         return not self.add_queue.empty() or not self.delete_queue.empty()
 
-    def get_ceremony_dict(self):
-        data = self._get_ceremony_data()
-        return self._get_ceremony_dict(data)
+    @staticmethod
+    def get_ceremony_dict():
+        data = TicketBot._get_ceremony_data()
+        return TicketBot._get_ceremony_dict(data)
+
+    def get_current_season(self):
+        self.ceremony_dict = TicketBot.get_ceremony_dict()
+        ceremony_date_strings = list(self.ceremony_dict.keys())
+        year = datetime.datetime.now().year
+        graduation_month = parse(ceremony_date_strings[0]).month
+        if graduation_month in (12, 11, 1):
+            season = "Fall"
+        elif graduation_month in (5, 4, 6):
+            season = "Spring"
+        else:
+            season = "Summer"
+        return "{} {}".format(season, year)
     # endregion
 
     # region DB-Helpers
@@ -98,9 +113,8 @@ class TicketBot(RedditBot, RedditPosterMixin):
             'resolved': False
         }
 
-    @staticmethod
-    def _get_user_key(user_name):
-        return {'user_name': user_name.lower()}
+    def _get_user_key(self, user_name, ceremony_date):
+        return {'user_name': user_name.lower(), 'ceremony_date': next(cd for cd in self.ceremony_dict if parse(cd) == parse(ceremony_date))}
 
     def _add_new_db_record(self, command_tuple):
         """
@@ -109,20 +123,20 @@ class TicketBot(RedditBot, RedditPosterMixin):
         :return:
         """
         logger.info("Saving new record in database: {}".format(command_tuple))
-        self._ticketbot_table = self._get_ticketbot_table()
-        self._ticketbot_table.put_item(Item=self._get_user_item(command_tuple))
+        ticketbot_table = self._get_ticketbot_table()
+        ticketbot_table.put_item(Item=self._get_user_item(command_tuple))
 
-    def _delete_db_record(self, user_name):
+    def _delete_db_record(self, user_name, ceremony_date):
         logger.info("Deleting user from database: user=[{}]".format(user_name))
-        self._ticketbot_table = self._get_ticketbot_table()
-        self._ticketbot_table.delete_item(Key=self._get_user_key(user_name))
+        ticketbot_table = self._get_ticketbot_table()
+        ticketbot_table.delete_item(Key=self._get_user_key(user_name, ceremony_date))
 
-    def _update_db_record(self, user_name, operator_string, **items_to_update):
+    def _update_db_record(self, user_name, ceremony_date, operator_string, **items_to_update):
         update_expression = ",".join("SET {value} {operator} :{value}".format(value=item, operator=operator_string) for item in items_to_update)
         expression_attribute_values = {':{}'.format(item): new_value for item, new_value in items_to_update.items()}
-        self._ticketbot_table = self._get_ticketbot_table()
-        self._ticketbot_table.update_item(
-            Key=self._get_user_key(user_name),
+        ticketbot_table = self._get_ticketbot_table()
+        ticketbot_table.update_item(
+            Key=self._get_user_key(user_name, ceremony_date),
             UpdateExpression=update_expression,
             ExpressionAttributeValues=expression_attribute_values
         )
@@ -131,10 +145,14 @@ class TicketBot(RedditBot, RedditPosterMixin):
         to_update = {value_name: delta}
         self._update_db_record(user_name, "= {} +".format(value_name), **to_update)
 
+    def _decrement_db_item_value(self, user_name, value_name, delta):
+        to_update = {value_name: delta}
+        self._update_db_record(user_name, "= {} -".format(value_name), **to_update)
+
     def _batch_write_new_db_records(self):
         if self._queue_data_present():
-            self._ticketbot_table = self._get_ticketbot_table()
-            with self._ticketbot_table.batch_writer(overwrite_by_pkeys=['user_name', 'ceremony_date']) as batch:
+            ticketbot_table = self._get_ticketbot_table()
+            with ticketbot_table.batch_writer(overwrite_by_pkeys=['user_name', 'ceremony_date']) as batch:
                 while not self.delete_queue.empty():
                     item = self.delete_queue.get()
                     logger.info("Deleting DB record: Key=[{}]".format(item))
@@ -184,44 +202,25 @@ class TicketBot(RedditBot, RedditPosterMixin):
     # endregion
 
     # region Set-User-Vals
-    def _set_user_resolved(self, resolve_tuple):  # todo refactor
+    def _set_user_resolved(self, resolve_tuple, _ticketbot_table=None):  # todo refactor
         """
         :type resolve_tuple: TicketBot.ResolveTuple
         :param resolve_tuple:
         :return:
         """
-        user_name, resolved_with, resolved_amount = resolve_tuple.user.lower(), resolve_tuple.resolve_with.lower(), resolve_tuple.resolve_amount
+        user_name, resolved_with, \
+        resolved_amount, ceremony_date = resolve_tuple.user.lower(), resolve_tuple.resolve_with.lower(), \
+                                         int(resolve_tuple.resolve_amount), resolve_tuple.date
+
         logger.info("Resolving transaction between: user=[{}], resolvedWith=[{}]".format(user_name, resolved_with))
         logger.info("Updating user in database: user=[{}]".format(user_name))
-        expresson = "SET resolved = :resolved_val, resolved_with = :resolved_with"
-        first_attributes = {':resolved_val': True, ':resolved_with': resolved_with}
-        second_attributes = {':resolved_val': True, ':resolved_with': user_name}
-        if resolved_amount is not None:
-            expresson += ", amount = amount - :resolved_amount"
-            first_attributes[':resolved_amount'] = int(resolved_amount)
-            second_attributes[':resolved_amount'] = int(resolved_amount)
-        else:
-            expresson += ", amount = :resolved_amount"
-            first_attributes[':resolved_amount'] = 0
-            second_attributes[':resolved_amount'] = 0
-
-        self._ticketbot_table.update_item(
-            Key={'user_name': user_name},
-            UpdateExpression=expresson,
-            ExpressionAttributeValues=first_attributes
-        )
+        self._change_user_ticket_amount(user_name, -resolved_amount)
         logger.info("Updating user in database: user=[{}]".format(resolved_with))
-        self._ticketbot_table.update_item(
-            Key={'user_name': resolved_with},
-            UpdateExpression=expresson,
-            ExpressionAttributeValues=second_attributes
-        )
+        self._change_user_ticket_amount(resolved_with, -resolved_amount)
 
     def _set_user_ticket_amount(self, user_name, new_amount):
         logger.info("Updating ticket amount in database: user=[{}], newAmount=[{}]".format(user_name, new_amount))
         self._update_db_record(user_name, "=", amount=new_amount)
-
-
 
     def _change_user_ticket_amount(self, user_name, delta):
         self._increment_db_item_value(user_name, 'amount', delta)
@@ -229,15 +228,15 @@ class TicketBot(RedditBot, RedditPosterMixin):
 
     # region Get-Users
     def _get_users_by_ceremony_date(self, ceremony_date_string):
-        self._ticketbot_table = self._get_ticketbot_table()
+        ticketbot_table = self._get_ticketbot_table()
         filter_expression = Key('ceremony_date').eq(ceremony_date_string)
         result = []
-        response = self._ticketbot_table.scan(
+        response = ticketbot_table.scan(
             ProjectionExpression='user_name, ceremony_date, amount, operation, last_notified',
             FilterExpression=filter_expression)
         result = response['Items']
         while 'LastEvaluatedKey' in response:
-            response = self._ticketbot_table.scan(
+            response = ticketbot_table.scan(
                 ProjectionExpression="user_name, ceremony_date, amount, operation, last_notified",
                 FilterExpression=filter_expression,
                 ExclusiveStartKey=response['LastEvaluatedKey'])
@@ -245,8 +244,8 @@ class TicketBot(RedditBot, RedditPosterMixin):
         return result
 
     def _get_user_by_username(self, user_name):
-        self._ticketbot_table = self._get_ticketbot_table()
-        response = self._ticketbot_table.query(
+        ticketbot_table = self._get_ticketbot_table()
+        response = ticketbot_table.query(
             KeyConditionExpression=Key('user_name').eq(user_name.lower())
         )
         return response['Items']
@@ -278,15 +277,43 @@ class TicketBot(RedditBot, RedditPosterMixin):
         return self._get_users_by_date_and_operation(ceremony_date_string, 'sell', has_tickets)
 
     def get_buyers_for_notification(self):
-        return {ceremony: self._get_buyers_by_date(ceremony) for ceremony in self.ceremony_dict}
+        buyers = {ceremony: self._get_buyers_by_date(ceremony) for ceremony in self.ceremony_dict}
+        to_delete = [key for key, val in buyers.items() if not val]
+        for key in to_delete:
+            del buyers[key]
+        return buyers
 
     def get_sellers_for_notification(self):
-        return {ceremony: self._get_sellers_by_date(ceremony) for ceremony in self.ceremony_dict}
+        sellers = {ceremony: self._get_sellers_by_date(ceremony) for ceremony in self.ceremony_dict}
+        to_delete = [key for key, val in sellers.items() if not val]
+        for key in to_delete:
+            del sellers[key]
+        return sellers
 
     def get_users_for_notification(self):
         users = {ceremony: self._get_users_by_date_and_operations(ceremony, TicketBot.NOTIFY_INTERVAL) for ceremony in self.ceremony_dict}
         to_return = {ceremony: operation_dict for ceremony, operation_dict in users.items() if any(val for val in operation_dict.values())}
         return to_return
+    # endregion
+
+    # region Reddit-Posts
+
+    def megathread_title(self):
+        return "Graduation Ticket Megathread [{}]".format(self.get_current_season())
+
+    def get_megathread_by_title(self, subreddit, title=""):
+        current_megathread_title = title or self.megathread_title()
+        search_query = "title:{} AND author:{}".format(current_megathread_title, self.USER_NAME)
+        for post in self.r.search(search_query, subreddit=subreddit):
+            if post:
+                logger.info("Found megathread by title=[{}], subreddit=[{}]".format(current_megathread_title, subreddit))
+                return post
+        return None
+
+
+    def create_ticket_megathread(self, subreddit, title, text):
+        return self.create_monitored_post(subreddit, title, text)
+
     # endregion
 
     # region Reddit-Messages
@@ -295,8 +322,7 @@ class TicketBot(RedditBot, RedditPosterMixin):
         message = "Uh oh! Your last command included a date on which there are no ceremonies scheduled.\n\n" \
                   "Your last command was: `{} {} {}`\n\n" \
                   "Here are your choices:\n\n".format(err.operation, err.amount, err.given_date)
-        for date in self.ceremony_dict.keys():
-            message += "* {}\n".format(date)
+        message += self.reddit_list(self.ceremony_dict.keys())
         message += "\n\nYou may try again with one of those dates."
         subject = "Invalid Ceremony Date in Your Command"
         self.r.send_message(err.user, subject, message)
@@ -361,34 +387,41 @@ to their Reddit user profiles. From there you can send them private messages to 
         self.r.send_message(command_tuple.user, subject, message)
 
     def _send_delete_confirmation_message(self, user_name):
-        message = "Your graduation ticket record has been deleted from the database. " \
-                  "You will no longer be considered when I try to match buyers and sellers of graduation tickets. " \
-                  "Feel free to sign up again at any time."
+        message = self.reddit_paragraph("Your graduation ticket record has been deleted from the database. "
+                                        "You will no longer be considered when I try to match buyers and sellers of "
+                                        "graduation tickets. Feel free to sign up again at any time.")
         subject = "Successfully Deleted Record"
         self.r.send_message(user_name, subject, message)
 
     def _send_missing_ceremony_message(self, err):
-        message = "Oh no! You want to {} {} tickets, but you didn't specify which ceremony you wish to attend. " \
-                  "Please send another command and include the ceremony date. Your choices are:\n\n".format(err.operation, err.amount)
-        for date in self.ceremony_dict.keys():
-            message += "* {}\n".format(date)
+        message = self.reddit_paragraph("Oh no! You want to {} {} tickets, but you didn't specify which ceremony you "
+                                        "wish to attend. Please send another command and include the ceremony date. "
+                                        "Your choices are:".format(err.operation, err.amount))
+        message += self.reddit_list(self.ceremony_dict.keys())
         message += '\n\n'
-        message += "I recommend copying and pasting one of those dates when you write your new command so that I " \
-                   "don't get confused and put the wrong date by your name in my database. I'm usually pretty good " \
-                   "about parsing dates, but better safe than sorry!"
+        message += self.reddit_paragraph("I recommend copying and pasting one of those dates when you write your new "
+                                         "command so that I don't get confused and put the wrong date by your name in "
+                                         "my database. I'm usually pretty good about parsing dates, but better safe "
+                                         "than sorry!")
         subject = "Missing Ceremony in Command"
         self.r.send_message(err.user, subject, message)
 
     def _generate_buy_sell_notification(self, operation):
 
-        message_template = "Good news! I found some students who are trying to {other_operation} graduation tickets. " \
-                           "Now you should visit their profiles and send them private messages to discuss {operation}ing " \
-                           "the tickets.\n\nIf you end up {operation}ing tickets from anyone, please let me know! Here's " \
-                           "how you \"resolve\" a purchase. :\n\n `!Faubot resolve <number> <{other_operation}er_username>`\n\n" \
-                           "For example, `!FAUbot resolve 5 /u/jpfau` means you {past_tense_operation} 5 tickets from " \
-                           "the user jpfau. For now, I will only accept resolve commands from buyers, and I will ignore " \
-                           "them from sellers. It's up to you to help keep my ticket system working!\n\nAnyway, here is " \
-                           "the list of {other_operation}ers:\n\n"
+        message_template = self.reddit_paragraph("Good news! I found some students who are trying to {other_operation} "
+                                                 "graduation tickets. Now you should visit their profiles and send "
+                                                 "them private messages to discuss {operation}ing the tickets.")
+        message_template += self.reddit_paragraph("If you end up {operation}ing tickets from anyone, please let me "
+                                                  "know! Here's how you \"resolve\" a purchase:")
+
+        message_template += self.reddit_code_block("!Faubot resolve <number> <{other_operation}er_username>\n")
+
+        message_template += self.reddit_paragraph("For example, `!FAUbot resolve 5 /u/jpfau` means you "
+                                                  "{past_tense_operation} 5 tickets from the user jpfau. For now, I "
+                                                  "will only accept resolve commands from buyers, and I will ignore "
+                                                  "them from sellers. It's up to you to help keep my ticket system "
+                                                  "working!")
+        message_template += self.reddit_paragraph("Anyway, here is the list of {other_operation}ers:")
         if operation == 'buy':
             past_tense_operation = 'bought'
             other_operation = 'sell'
@@ -402,9 +435,10 @@ to their Reddit user profiles. From there you can send them private messages to 
     def _notify_buyers_sellers(self, to_notify, operation):
         for user_name, list_users in to_notify.items():
             message = self._generate_buy_sell_notification(operation)
-            for other_user in list_users:
-                message += "* **/u/{}** is {}ing **{}** tickets\n".format(other_user['user_name'], other_user['operation'], other_user['amount'])
-            message += "\n\n"
+            user_list = ["**/u/{}** is {}ing **{}** tickets"
+                         .format(other_user['user_name'], other_user['operation'], other_user['amount'])
+                         for other_user in list_users]
+            message += self.reddit_list(user_list)
             subject = "It's a match!"
             self.r.send_message(user_name, subject, message)
 
@@ -413,6 +447,93 @@ to their Reddit user profiles. From there you can send them private messages to 
 
     def notify_sellers(self, sellers):
         self._notify_buyers_sellers(sellers, 'sell')
+
+    def megathread_missing_ceremony_reply(self, comment, err):
+        user, operation, amount, choices = err.user, err.operation, err.amount, err.choices
+        message = self.reddit_paragraph("Oh no! You tried to {operation} {amount} tickets, but you did not specify a "
+                                        "ceremony date. Try your previous command again and include one of the "
+                                        "following dates:".format(operation=operation, amount=amount))
+        message += self.reddit_list(choices)
+        comment.reply(message)
+
+    def megathread_invalid_ceremony_reply(self, comment, err):
+        user, operation, amount, given_date, choices = err.user, err.operation, err.amount, err.given_date, err.choices
+        message = self.reddit_paragraph("Oh no! You tried to {operation} {amount} tickets, but the ceremony date "
+                                        "you specified is invalid. The date you provided is:"
+                                        .format(operation=operation, amount=amount))
+        message += self.reddit_paragraph("{given_date}".format(given_date=given_date))
+        message += self.reddit_paragraph("Please retry your previous command with one of the following dates.")
+        message += self.reddit_list(choices)
+        comment.reply(message)
+
+    def megathread_invalid_command_reply(self, comment, err):
+        user, bad_command = err.user, err.message_body
+        message = self.reddit_paragraph("Oh no! You summoned me, but I can't make any sense of your command. You said:")
+        message += self.reddit_block_quote(bad_command)
+        message += self.reddit_paragraph("If you want to buy or sell tickets, please review the instructions and try "
+                                         "again.")
+        comment.reply(message)
+
+    def megathread_new_user_reply(self, comment, new_user_tuple):
+        message = self.reddit_paragraph("Congratulations! You successfully added yourself to my database. I will try "
+                                        "to match you with people who can help you {operation} the tickets you need. "
+                                        "I will PM you once per day with a list of matches. You can also check this "
+                                        "megathread, as I will be updating the lists of buyers and sellers throughout "
+                                        "the day.".format(operation=new_user_tuple.operation))
+        if new_user_tuple.operation == 'buy':
+            message += self.reddit_paragraph("If you end up buying tickets from anyone, please let me know with a "
+                                             "\"resolve\" command. You can find instructions for sending me resolve "
+                                             "commands in the body of this megathread.")
+        comment.reply(message)
+
+    def megathread_comment_resolve_reply(self, comment, resolve_tuple):
+        message = self.reddit_paragraph("Congratulations! You just saved your transaction to my database. According "
+                                        "to your command, you resolved {amount} tickets with {resolve_with}."
+                                        .format(amount=resolve_tuple.amount, resolve_with=resolve_tuple.resolve_with))
+        message += self.reddit_paragraph("If this is wrong, I currently don't have a way for you to fix this except "
+                                         "for contacting my maker, /u/jpfau, and asking him for help.")
+        comment.reply(message)
+
+    def generate_megathread_body(self):
+        table_header = ('Username', 'Amount', 'Ceremony Date')
+
+        body = self.reddit_header("Instructions")
+        body += self.reddit_paragraph("*Note: All commands can be sent to me in a PM, or you can send a command as a "
+                                      "comment in this megathread.*")
+
+        body += self.reddit_header("New Users", 2)
+        body += self.reddit_paragraph("To add yourself to the database, which allows me to match you with other "
+                                         "users and generate the buyer/seller lists in this thread, send me a "
+                                         "\"New User\" command.")
+        body += self.reddit_list(["Format: " + self.reddit_code_block("!FAUbot [buy|sell] [amount] [date]"),
+                                  "Example: " + self.reddit_code_block("!FAUbot buy 5 December 16, 2016")])
+
+        body += self.reddit_header("Resolving Transactions", 2)
+        body += self.reddit_paragraph("If you find another Redditor who wants to buy or sell tickets from you, you "
+                                      "can update both your current buy/sell amounts by sending a \"Resolve\" command.")
+        body += self.reddit_list(["Format: " + self.reddit_code_block("!FAUbot resolve [amount] [other_redditor] [ceremony_date]"),
+                                  "Example: " + self.reddit_code_block("!FAUbot resolve 2 /u/jpfau December 16, 2016")])
+        body += self.reddit_paragraph("*Note: I currently accept resolve commands from __buyers only__. If you "
+                                      "just sold some tickets and want to update your current ticket amount, make sure"
+                                      "the buyer sends me a resolve command.*")
+        body += self.reddit_horizontal_rule()
+
+
+        buyer_dict = self.get_buyers_for_notification()
+        seller_dict = self.get_sellers_for_notification()
+
+        body += self.reddit_header("Buyers")
+        for buyer_list in buyer_dict.values():
+            buyer_tuples = [(b['user_name'], b['amount'], b['ceremony_date']) for b in buyer_list]
+            if buyer_tuples:
+                body += self.reddit_table(buyer_tuples, header=table_header)
+
+        body += self.reddit_header("Sellers")
+        for seller_list in seller_dict.values():
+            seller_tuples = [(s['user_name'], s['amount'], s['ceremony_date']) for s in seller_list]
+            if buyer_tuples:
+                body += self.reddit_table(seller_tuples, header=table_header)
+        return body
     # endregion
 
     # region Parse-Commands
@@ -431,16 +552,18 @@ to their Reddit user profiles. From there you can send them private messages to 
                 date = next((d for d in self.ceremony_dict if parse(d) == dt))
             except StopIteration:
                 raise InvalidCeremonyDate(user, operation, amount, command.groups()[2], self.ceremony_dict.keys())
-        return TicketBot.CommandTuple(user=user, operation=operation, amount=amount, date=date)
+        return TicketBot.UserTuple(user=user, operation=operation, amount=amount, date=date)
 
     @staticmethod
     def _parse_resolve_command(command, message):
-        resolved_with = command.groups()[0]
+        groups = command.groups()
+        resolved_amount = groups[0]
         try:
-            resolved_amount = command.groups()[1]
+            resolved_with = groups[1]
         except IndexError:
-            resolved_amount = None
-        return TicketBot.ResolveTuple(user=message.author.name, resolve_with=resolved_with, resolve_amount=resolved_amount)
+            resolved_with = None
+        resolve_date = groups[2]
+        return TicketBot.ResolveTuple(user=message.author.name, resolve_with=resolved_with, resolve_amount=resolved_amount, date=resolve_date)
 
     def parse_command(self, message):
         logger.info("Parsing message: author=[{}], message=[{}]".format(message.author.name, message.body))
@@ -454,11 +577,36 @@ to their Reddit user profiles. From there you can send them private messages to 
             return self._parse_resolve_command(command, message)
         raise InvalidCommand(message.author, message.body)
 
-    def parse_ticket_commands(self):
+    def monitor_comment_ticketbot(self, comment):
+        comment.refresh()
+        try:
+            command = self.parse_command(comment)
+        except NoCommandInMessage:
+            return
+        except InvalidCommand as err:
+            self.megathread_invalid_command_reply(comment, err)
+        except InvalidCeremonyDate as err:
+            self.megathread_invalid_ceremony_reply(comment, err)
+        except MissingCeremonyDate as err:
+            self.megathread_missing_ceremony_reply(comment, err)
+        else:
+            self._read_comments[comment.id] = comment
+            command_function = self.get_command_function(command, self.megathread_new_user_reply,
+                                                         self.megathread_comment_resolve_reply)
+            command_function(comment, command)
+
+    def get_command_function(self, command, commandtuple_fn, resolvetuple_fn):
+        if isinstance(command, TicketBot.UserTuple):
+            self._new_user_add_queue(command)
+            return commandtuple_fn
+        if isinstance(command, TicketBot.ResolveTuple):
+            self._set_user_resolved(command)
+            return resolvetuple_fn
+
+    def parse_commands_from_inbox(self):
         to_notify = []
         inbox = self.r.get_unread(unset_has_mail=True)
         for message in inbox:
-
             mark_as_read = True
             function, params = None, None
             if self.DELETE_COMMAND in message.body:
@@ -477,12 +625,8 @@ to their Reddit user profiles. From there you can send them private messages to 
                 except MissingCeremonyDate as err:
                     function, params = self._send_missing_ceremony_message, err
                 else:
-                    if isinstance(command, TicketBot.CommandTuple):
-                        self._new_user_add_queue(command)
-                        function, params = self._send_confirmation_message, command
-                    if isinstance(command, TicketBot.ResolveTuple):
-                        self._set_user_resolved(command)
-                        function, params = self._send_resolve_confirmation_message, command
+                    function, params = self.get_command_function(command, self._send_confirmation_message,
+                                                                 self._send_resolve_confirmation_message), command
             if mark_as_read:
                 message.mark_as_read()
                 to_notify.append(TicketBot.NotifyFunctionTuple(function=function, params=params))
@@ -501,13 +645,57 @@ to their Reddit user profiles. From there you can send them private messages to 
             self.notify_sellers(sellers_to_notify)
         self._set_users_notified(users)
 
-    def update_ticket_megathread(self):
-        pass # todo implement
+    def parse_commands_from_megathread(self):
+        if self.monitored_posts:
+            logger.info("Parsing commands from megathreads")
+            for thread_id in self.monitored_posts.keys():
+                self.monitor(thread_id, '!FAUbot', self.monitor_comment_ticketbot)
+        else:
+            logger.info("Skipping parse of megathread commands because none exist yet.")
+
+    def update_megathreads(self, new_body):
+        for post_id in self.monitored_posts.keys():
+            post = self.monitored_posts[post_id]
+            if new_body != post.selftext:
+                logger.info("Updating megathread: subreddit=[{}], title=[{}], id=[{}]"
+                            .format(post.subreddit, post.title, post_id))
+                self.update_monitored_post(post_id, new_body)
+            else:
+                logger.info("Megathread selftext unchanged. Skipping update: subreddit=[{}], title=[{}], id=[{}]"
+                            .format(post.subreddit, post.title, post_id))
+
+    def create_or_update_megathreads(self):
+        new_megathread_body = self.generate_megathread_body()
+        megathread_title = self.megathread_title()
+        if not self.monitored_posts:
+            for subreddit in self.subreddits:
+
+                megathread = self.get_megathread_by_title(subreddit, title=megathread_title)
+                if megathread:
+                    self.monitored_posts[megathread.id] = megathread
+                    if new_megathread_body != megathread.selftext:
+                        logger.info("Updating megathread: subreddit=[{}], title=[{}], id=[{}]".format(subreddit,
+                                                                                                  megathread_title,
+                                                                                                  megathread.id))
+                        self.update_monitored_post(megathread.id, new_megathread_body)
+                    else:
+                        logger.info("Megathread selftext unchanged. Skipping update: subreddit=[{}], title=[{}], "
+                                    "id=[{}]".format(subreddit, megathread_title, megathread.id))
+
+                else:
+                    new_id = self.create_ticket_megathread(subreddit, megathread_title, new_megathread_body)
+                    logger.info("Creating megathread: subreddit=[{}], title=[{}], id=[{}]".format(subreddit,
+                                                                                                  megathread_title,
+                                                                                                  new_id))
+        else:
+            self.update_megathreads(new_megathread_body)
 
     def work(self):
-        self.parse_ticket_commands()
-        self.match_ticket_users()
-        self.update_ticket_megathread()
+        self.ceremony_dict = self.get_ceremony_dict()
+        self.parse_commands_from_inbox()
+        #self.parse_commands_from_megathread()
+        #self.create_or_update_megathreads()
+        #self.match_ticket_users()
 # endregion
 
 
@@ -530,6 +718,7 @@ class InvalidCeremonyDate(ValueError):
         self.amount = amount
         self.operation = operation
         self.given_date = given_date
+        self.choices = choices
         msg = "Invalid Ceremony Date: given=[{}], choices={}".format(self.given_date, choices)
         super(InvalidCeremonyDate, self).__init__(msg)
 
@@ -539,6 +728,7 @@ class MissingCeremonyDate(ValueError):
         self.user = user
         self.amount = amount
         self.operation = operation
+        self.choices = choices
         msg = "Missing ceremony date in command: user=[{}], amount=[{}], operation=[{}], choices=[{}]".format(user, operation, amount, choices)
         super(MissingCeremonyDate, self).__init__(msg)
 # endregion
@@ -551,8 +741,10 @@ def main():
     parser = ArgumentParser("Running TicketBot by itself")
     parser.add_argument("-u", "--user", dest="reddit_user", required=True, choices=get_all_site_names(),
                         help="Specify which Reddit user from praw.ini to use.")
+    parser.add_argument('--loop', dest="loop", default=False, action="store_true",
+                        help="Allow bot to loop instead of running once")
     args = parser.parse_args()
-    test = TicketBot(args.reddit_user, run_once=True)
+    test = TicketBot(args.reddit_user, run_once=not args.loop)
     test.start()
     test.stop_event.wait()
 

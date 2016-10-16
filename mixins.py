@@ -1,14 +1,14 @@
+from abc import abstractmethod
+
+from praw.helpers import flatten_tree
+
 import bots
+from pprint import PrettyPrinter
+p = PrettyPrinter(indent=2)
 
-
-class RedditPosterMixin():
-
-    def __init__(self):
-        pass
-
-    def _r_table_divider(self, length, divider=None):
-        divider = divider or "|"
-        return divider.join("---" for _ in range(length)) + "\n"
+class MarkdownMaker:
+    def _r_table_divider(self, length, divider="|", sep="---"):
+        return divider.join(sep for _ in range(length)) + "\n"
 
     def reddit_table_row(self, *row_items, header=False):
         divider = "{0}|{0}"
@@ -35,13 +35,14 @@ class RedditPosterMixin():
         table += self.reddit_table_header(*to_insert)
         for row_item in table_rows[row_start_index:]:
             table += self.reddit_table_row(*row_item)
-        return table
+        return self.reddit_paragraph(table)
 
-    def reddit_paragraph(self, content):
+    def reddit_paragraph(self, content=""):
+        new_line = "\n"
         multipliers = tuple(abs(z) for z in range(2, -3, -1))
         for i, e in enumerate(multipliers):
-            if content.endswith("\n" * e):
-                return content + '\n' * multipliers[i+2]
+            if content.endswith(new_line * e):
+                return content + new_line * multipliers[i+2]
 
     def _reddit_list(self, nested_list, current_indentation_level):
         to_return = ""
@@ -57,6 +58,9 @@ class RedditPosterMixin():
         rlist = self._reddit_list(nested_list, 0)
         return self.reddit_paragraph(rlist)
 
+    def reddit_newline(self):
+        return "\n\n"
+
     def reddit_code_block(self, content):
         content = content.strip()
         if '\n' in content:
@@ -65,5 +69,51 @@ class RedditPosterMixin():
         else:
             return "`{}`".format(content)
 
-if __name__ == '__main__':
-    p = RedditPosterMixin()
+    def reddit_block_quote(self, content):
+        content = content.strip()
+        quote = self.reddit_newline().join(">"+line for line in content.split(self.reddit_newline()))
+        return self.reddit_paragraph(quote)
+
+    def reddit_header(self, header_value, header_level=1):
+        header_level = header_level or 1
+        header = ("#" * header_level) + header_value
+        return self.reddit_paragraph(header)
+
+    def reddit_horizontal_rule(self):
+        return self.reddit_paragraph("---")
+
+
+class RedditPosterMixin(bots.RedditBot, MarkdownMaker):
+    def __init__(self, user_name, *args, **kwargs):
+        super(RedditPosterMixin, self).__init__(user_name, *args, **kwargs)
+        self.monitored_posts = dict()
+        self._read_comments = dict()
+
+    @abstractmethod
+    def work(self):
+        pass
+
+    def create_monitored_post(self, subreddit, title, body):
+        submission = self.r.submit(subreddit, title, body)
+        self.monitored_posts[submission.id] = submission
+        return submission.id
+
+    def get_monitored_post(self, post_id, refresh=True):
+        post = self.monitored_posts[post_id]
+        if refresh:
+            post.refresh()
+        return post
+
+    def update_monitored_post(self, post_id, new_text):
+        self.monitored_posts[post_id].edit(new_text)
+
+    def delete_monitored_post(self, post_id):
+        self.monitored_posts[post_id].delete()
+        del self.monitored_posts[post_id]
+
+    def monitor(self, post_id, trigger, response, *args, **kwargs):
+        post = self.get_monitored_post(post_id)
+        comments = filter(lambda c: c.id not in self._read_comments.keys(), flatten_tree(post.comments))
+        for comment in comments:
+            if trigger in comment.body:
+                response(comment, *args, **kwargs)
