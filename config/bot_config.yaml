@@ -11,7 +11,7 @@ intervals:
         ExampleBot2: *debugInterval
         RedditPosterMixin: *debugInterval
 subreddits:
-    - FAUbot
+    - FAUbot_dev
 user_agents:
     debug: &debugAgent "/u/{username} prototyping a Reddit bot class"
     ExampleBot1: *debugAgent

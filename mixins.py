@@ -13,7 +13,7 @@ class MarkdownMaker:
     def reddit_table_row(self, *row_items, header=False):
         divider = "{0}|{0}"
         spaced, unspaced = divider.format(" "), divider.format("")
-        row = spaced.join(item or " " for item in row_items) + "\n"
+        row = spaced.join(str(item) or " " for item in row_items) + "\n"
         if header:
             row += self._r_table_divider(len(row_items))
         return row
@@ -117,3 +117,16 @@ class RedditPosterMixin(bots.RedditBot, MarkdownMaker):
         for comment in comments:
             if trigger in comment.body:
                 response(comment, *args, **kwargs)
+
+
+
+class DynamoDBMixin:
+    pass
+
+
+
+
+
+class MongoUserMixin:
+    def __init__(self, db_name):
+        pass

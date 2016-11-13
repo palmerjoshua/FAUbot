@@ -40,8 +40,9 @@ class Bot(threading.Thread, metaclass=ABCMeta):
         :param kwargs: Needed so that arbitrary keyword arguments may be passed without raising an exception
         """
         super(Bot, self).__init__(daemon=True)
+        self.name = self.__class__.__name__
         self.stop_event = threading.Event()
-        self.sleep_interval = bot_config.get_sleep_interval(self.__class__.__name__) if not run_once else 0
+        self.sleep_interval = bot_config.get_sleep_interval(self.name) if not run_once else 0
         self._reset_sleep_interval = reset_sleep_interval
         self._run_once = RUN_BOTS_ONCE or run_once
 

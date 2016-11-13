@@ -1,9 +1,9 @@
 beautifulsoup4==4.4.1
-boto3==1.4.0
-botocore==1.4.28
+boto3>=1.4.0
+botocore>=1.4.28
 ddt==1.1.0
 praw==3.5.0
-pyaml==15.8.2
-requests==2.10.0
-python-dateutil==2.5.3
-pytz==2016.4
+pyaml>=15.8.2
+requests>=2.10.0
+python-dateutil>=2.5.3
+pytz>=2016.4

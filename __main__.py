@@ -83,9 +83,10 @@ class Dispatch(threading.Thread, metaclass=ABCMeta):
         :param timeout: Time to wait before forcefully stopping itself (wait forever if None).
         :return: Original return value of Thread.join()
         """
+        timeout_per_bot = None if timeout is None else timeout // sum(len(bot_list) for bot_list in self.bots.values())
         for bot_list in self.bots.values():
             for bot in bot_list:
-                bot.join(timeout)
+                bot.join(timeout_per_bot)
         self.stop.set()
         return super(Dispatch, self).join(timeout)
 
