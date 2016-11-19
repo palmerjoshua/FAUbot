@@ -846,9 +846,13 @@ to their Reddit user profiles. From there you can send them private messages to 
             self.create_megathreads(megathread_title, new_megathread_body)
 
     def work(self):
-        self.refresh_ceremony_dict()
-        self.parse_commands_from_inbox()
-        self.create_or_update_megathreads()
+        try:
+            self.refresh_ceremony_dict()
+            self.parse_commands_from_inbox()
+            self.create_or_update_megathreads()
+        except Exception as e:
+            logger.exception("Unexpected Exception: {}".format(str(e)))
+
 # endregion
 
 
