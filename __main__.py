@@ -3,7 +3,7 @@ from abc import ABCMeta
 from time import sleep
 from argparse import ArgumentParser
 
-import newsbot  # you must import your bot file here, even if you don't use it
+import newsbot
 import eventbot
 import ticketbot
 import config
@@ -17,8 +17,8 @@ BOT_CLASSES = {cls.__name__: cls for cls in RedditBot.get_subclasses()}
 
 logger = config.getLogger()
 parser = ArgumentParser(description="FAUbot options")
-parser.add_argument("-a", "--account", dest='account', choices=praw_config.get_all_site_names(),
-                    help="Specify which Reddit account configured in praw.ini will be used to launch bots.")
+parser.add_argument("-u", "--user", dest='user', choices=praw_config.get_all_site_names(),
+                    help="Specify which Reddit user configured in praw.ini will be used to launch bots.")
 
 
 # region DISPATCH
@@ -112,8 +112,8 @@ def _generate_bot_signature(name):
 
 
 def _get_dispatch(cli_args):
-    if cli_args.account:
-        return Dispatch, [_generate_bot_signature(cli_args.account)]
+    if cli_args.user:
+        return Dispatch, [_generate_bot_signature(cli_args.user)]
     else:
         return GlobalDispatch, None
 
